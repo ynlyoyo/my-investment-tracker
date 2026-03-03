@@ -12,51 +12,41 @@ st.set_page_config(page_title="Portfolio Pro", layout="wide")
 DATA_FILE = "my_portfolio.csv"
 
 def load_data():
-    """Loads CSV and ensures all required columns exist."""
     required_cols = ['Ticker', 'Category', 'Shares', 'Cost Basis', 'Manual Price']
     if os.path.exists(DATA_FILE):
         try:
             df = pd.read_csv(DATA_FILE)
-            # Add missing columns if user is upgrading from an older version
             for col in required_cols:
                 if col not in df.columns:
                     df[col] = np.nan
-            return df[required_cols] # Ensure column order
-        except Exception:
+            return df[required_cols]
+        except:
             return pd.DataFrame(columns=required_cols)
     return pd.DataFrame(columns=required_cols)
 
 def save_data(df):
-    """Saves the dataframe to CSV."""
     df.to_csv(DATA_FILE, index=False)
 
-# Initialize Session State
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_data()
 
-# --- HEADER ---
 st.title("📈 Investment Portfolio Visualizer")
 
 # --- 1. DATA MANAGEMENT ---
 st.header("📋 Portfolio Management")
-st.info("💡 **Tips:** Click cells to edit. Select a row and press 'Delete' to remove. Use 'Manual Price' if the Ticker is not found by the API.")
+st.info("💡 Edit cells below. Use 'Manual Price' if the Ticker is not found. Click 'Save & Refresh' to update.")
 
-# Dynamic Data Editor
 edited_df = st.data_editor(
     st.session_state.portfolio,
     num_rows="dynamic",
     column_config={
-        "Ticker": st.column_config.TextColumn("Ticker", help="Stock/ETF symbol"),
         "Category": st.column_config.SelectboxColumn("Category", options=["Stock", "ETF", "Bond/Fund", "Cash"]),
-        "Shares": st.column_config.NumberColumn("Shares", min_value=0.0),
-        "Cost Basis": st.column_config.NumberColumn("Avg Cost ($)", min_value=0.0),
-        "Manual Price": st.column_config.NumberColumn("Manual Price ($)", help="Override API price here"),
+        "Manual Price": st.column_config.NumberColumn("Manual Price ($)"),
     },
     use_container_width=True,
     key="portfolio_editor"
 )
 
-# Explicit Save Button
 if st.button("💾 Save Changes & Refresh Prices"):
     st.session_state.portfolio = edited_df
     save_data(edited_df)
@@ -65,57 +55,68 @@ if st.button("💾 Save Changes & Refresh Prices"):
 # --- 2. PRICE ENGINE ---
 if not st.session_state.portfolio.empty:
     df = st.session_state.portfolio.copy()
-    
-    # Identify tickers for API (exclude Cash and empty Tickers)
     api_tickers = df[(df['Category'] != 'Cash') & (df['Ticker'].notna()) & (df['Ticker'] != "")]['Ticker'].unique().tolist()
     
     current_prices = {}
-    last_update = "Waiting for refresh..."
+    last_update = "N/A"
     
     if api_tickers:
-        with st.spinner('Updating market prices...'):
+        with st.spinner('Fetching market prices...'):
             try:
-                # Try to get live prices
-                # Note: interval='1m' ensures the most recent price is pulled
+                # Get the latest price point
                 price_data = yf.download(api_tickers + ['^GSPC'], period="1d", interval="1m")['Close']
-                
                 for ticker in api_tickers:
-                    # Get last available non-NaN price
                     ticker_series = price_data[ticker].dropna()
                     if not ticker_series.empty:
                         current_prices[ticker] = ticker_series.iloc[-1]
-                
-                last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            except Exception as e:
-                st.warning("⚠️ Market data API is currently busy or offline. Using Manual/Fallback prices.")
+                last_update = datetime.now().strftime("%H:%M:%S")
+            except:
+                st.warning("⚠️ API Timeout. Using manual prices.")
 
-    # Pricing Logic: API -> Manual Entry -> 1.0 (Cash)
     def get_final_price(row):
-        if row['Category'] == 'Cash':
-            return 1.0
-        
-        # 1. Try API
-        api_val = current_prices.get(row['Ticker'])
-        if pd.notna(api_val):
-            return api_val
-        
-        # 2. Try Manual Entry
-        if 'Manual Price' in row and pd.notna(row['Manual Price']):
-            return float(row['Manual Price'])
-            
+        if row['Category'] == 'Cash': return 1.0
+        api_val = current_prices.get(str(row['Ticker']).upper())
+        if pd.notna(api_val): return api_val
+        if 'Manual Price' in row and pd.notna(row['Manual Price']): return float(row['Manual Price'])
         return None
 
     df['Current Price'] = df.apply(get_final_price, axis=1)
-    
-    # UI Timestamp
-    st.markdown(f"**Last Market Refresh:** `{last_update}`")
+    st.markdown(f"**Last Refresh:** `{last_update}`")
 
-    # Filter out rows with missing prices for analysis
-    missing_prices = df[df['Current Price'].isna()]
-    if not missing_prices.empty:
-        st.error(f"❌ Missing prices for: {', '.join(missing_prices['Ticker'].tolist())}. Please enter a 'Manual Price' in the table above.")
-    
-    df_calc = df.dropna(subset=['Current Price'])
+    # Filter out rows missing prices
+    df_calc = df.dropna(subset=['Current Price']).copy()
 
-    # --- 3. DASHBOARD ---
-    if not
+    if not df_calc.empty:
+        df_calc['Total Value'] = df_calc['Shares'] * df_calc['Current Price']
+        total_val = df_calc['Total Value'].sum()
+        df_calc['Weight'] = df_calc['Total Value'] / total_val if total_val > 0 else 0
+        df_calc['G/L'] = (df_calc['Current Price'] - df_calc['Cost Basis']) * df_calc['Shares']
+
+        tab1, tab2, tab3 = st.tabs(["📊 Performance", "🛡️ Risk", "⚖️ Rebalance"])
+
+        with tab1:
+            m1, m2 = st.columns(2)
+            m1.metric("Total Value", f"${total_val:,.2f}")
+            t_gl = df_calc['G/L'].sum()
+            m2.metric("Gain/Loss", f"${t_gl:,.2f}", delta=f"{(t_gl/total_val)*100:.2f}%" if total_val > 0 else "0%")
+            
+            fig_pie = px.pie(df_calc, values='Total Value', names='Category', hole=0.4)
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with tab2:
+            st.subheader("Risk Analytics")
+            if len(api_tickers) > 0:
+                hist = yf.download(api_tickers + ['^GSPC'], period="1y")['Close'].pct_change().dropna()
+                if not hist.empty and '^GSPC' in hist.columns:
+                    # Filter weights for tickers that actually have history
+                    valid_tickers = [t for t in api_tickers if t in hist.columns]
+                    if valid_tickers:
+                        port_ret = hist[valid_tickers].mul(df_calc[df_calc['Ticker'].isin(valid_tickers)].set_index('Ticker')['Weight'], axis=1).sum(axis=1)
+                        vol = port_ret.std() * np.sqrt(252)
+                        beta = np.cov(port_ret, hist['^GSPC'])[0][1] / hist['^GSPC'].var()
+                        
+                        r1, r2 = st.columns(2)
+                        r1.metric("Volatility", f"{vol:.2%}")
+                        r2.metric("Beta (β)", f"{beta:.2f}")
+            else:
+                st
