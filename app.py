@@ -73,6 +73,7 @@ if not st.session_state.portfolio.empty:
     
     with st.spinner('Syncing Market Prices...'):
         try:
+            # Add HKD=X to get the exchange rate
             all_symbols = api_tickers + ["HKD=X"]
             price_data = yf.download(all_symbols, period="1d", interval="1m")['Close']
             
@@ -86,10 +87,11 @@ if not st.session_state.portfolio.empty:
             if not fx_series.empty:
                 fx_rate = fx_series.iloc[-1]
             
+            # UTC+8 Calculation
             now_utc8 = datetime.now(timezone.utc) + timedelta(hours=8)
             last_update = now_utc8.strftime("%Y-%m-%d %H:%M:%S")
         except:
-            st.warning("⚠️ Market API busy. Using manual prices where available.")
+            st.warning("⚠️ Market API busy. Using manual prices.")
 
     def get_price(row):
         if row['Category'] == 'Cash': return 1.0
@@ -120,28 +122,41 @@ if not st.session_state.portfolio.empty:
     m1.metric(f"Total Portfolio Value ({display_currency})", f"${total_val:,.2f}")
     
     def get_gl(row):
-        # Normalize cost basis to display currency
+        # Normalize cost basis to display currency for G/L calculation
         cost_in_display = row['Cost Basis'] * (fx_rate if (display_currency=="HKD" and row['Currency']=="USD") else (1/fx_rate if (display_currency=="USD" and row['Currency']=="HKD") else 1))
         return (row['Display Price'] - cost_in_display) * row['Shares']
         
     total_gl = df.apply(get_gl, axis=1).sum()
     m2.metric("Total Gain/Loss", f"${total_gl:,.2f}", delta=f"{(total_gl/total_val*100):.2f}%" if total_val > 0 else "0%")
 
-    # Category Charts
-    st.subheader("Asset Breakdown by Category")
+    # --- PIE CHARTS SECTION ---
+    
+    # 1. Whole Portfolio Pie Chart
+    st.subheader("Total Portfolio Allocation")
+    if total_val > 0:
+        # Grouping by category for the main chart
+        whole_portfolio_df = df.groupby('Category')['Total Value'].sum().reset_index()
+        fig_whole = px.pie(whole_portfolio_df, values='Total Value', names='Category', 
+                           hole=0.5, title="Distribution by Asset Class",
+                           color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig_whole.update_layout(margin=dict(l=20, r=20, t=50, b=20))
+        st.plotly_chart(fig_whole, use_container_width=True)
+    
+    # 2. Category Breakdown Pie Charts
+    st.subheader("Breakdown by Category")
     cat_cols = st.columns(4)
     categories = ["Stock", "ETF", "Bond/Fund", "Cash"]
     for i, cat in enumerate(categories):
         cat_df = df[df['Category'] == cat]
         with cat_cols[i]:
             if not cat_df.empty and cat_df['Total Value'].sum() > 0:
-                fig = px.pie(cat_df, values='Total Value', names='Ticker', title=f"{cat}s", hole=0.4)
-                fig.update_layout(showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                fig_cat = px.pie(cat_df, values='Total Value', names='Ticker', title=f"{cat}s", hole=0.4)
+                fig_cat.update_layout(showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
+                st.plotly_chart(fig_cat, use_container_width=True)
             else:
                 st.caption(f"No {cat} assets recorded.")
 
-    # Detailed Table
+    # --- DETAILED TABLE ---
     st.subheader(f"Holdings Detail ({display_currency})")
     st.dataframe(
         df[['Ticker', 'Category', 'Currency', 'Shares', 'Display Price', 'Total Value', 'Weight %']].style.format({
